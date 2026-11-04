@@ -1,0 +1,112 @@
+# Builds Hydra Mixer on a Windows machine of GitHub, runs the tests and makes the installer and the portable zip.
+# Start it by hand: Actions -> "Windows build and installer" -> Run workflow. The files are in the "Artifacts" of the run.
+# Pushing a tag like v0.6.1 also attaches them to a GitHub release.
+#
+# No Git needed: if a file "Hydra-Mixer-....zip" (the Potato changes) was uploaded to the root of the repository with the
+# web page of GitHub, its files are added to the sources before the build (the JUCE folder is never touched).
+name: Windows build and installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Get the sources (with the JUCE submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check that JUCE is there
+        run: |
+          if (-not (Test-Path "external/JUCE/CMakeLists.txt")) {
+            throw "external/JUCE is empty. This repository must be a fork / clone of TicT4x/Hydra-Mixer (the JUCE submodule is part of it), or add JUCE: git submodule add https://github.com/juce-framework/JUCE external/JUCE"
+          }
+
+      - name: Add the files of an uploaded zip (only if there is one)
+        run: |
+          $zip = Get-ChildItem -Path . -Filter "Hydra-Mixer-*.zip" -File | Select-Object -First 1
+          if ($null -eq $zip) {
+            Write-Host "No zip in the repository: the sources are built as they are."
+            exit 0
+          }
+          Write-Host "Adding the files of $($zip.Name)"
+          $tmp = Join-Path $env:RUNNER_TEMP "overlay"
+          Expand-Archive -Path $zip.FullName -DestinationPath $tmp -Force
+          $top = Get-ChildItem $tmp -Directory | Select-Object -First 1
+          foreach ($item in Get-ChildItem $top.FullName -Force) {
+            if ($item.Name -eq "external" -or $item.Name -eq ".git") { continue }
+            Copy-Item -Path $item.FullName -Destination . -Recurse -Force
+          }
+          Get-ChildItem src/net
+
+      - name: Set up the Visual C++ tools
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Make sure Ninja is available
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { choco install ninja -y --no-progress }
+          ninja --version
+
+      - name: Build (Release)
+        run: |
+          cmake -S . -B build/Release -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/Release
+
+      - name: Tests
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          $tests = "build/Release/HydraTests_artefacts/Release/HydraTests.exe"
+          & $tests *> test-log.txt
+          $code = $LASTEXITCODE
+          Get-Content test-log.txt -Tail 60
+          exit $code
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Make the installer and the portable zip
+        run: |
+          $exe = (Resolve-Path "build/Release/HydraMixer_artefacts/Release/Hydra Mixer.exe").Path
+          $version = "0.6.0"
+          if ((Get-Content CMakeLists.txt -Raw) -match 'project\(HydraMixer VERSION ([0-9][0-9.]*)') { $version = $Matches[1] }
+          New-Item -ItemType Directory -Force installer/Output | Out-Null
+          Compress-Archive -Path $exe, LICENSE, README.md -DestinationPath "installer/Output/HydraMixer-$version-win64.zip"
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          $isccArgs = @("/DAppVersion=$version", "/DBuildDir=$(Split-Path -Parent $exe)")
+          $ico = "build/Release/HydraMixer_artefacts/JuceLibraryCode/icon.ico"
+          if (Test-Path $ico) { $isccArgs += "/DIconFile=$((Resolve-Path $ico).Path)" }
+          & $iscc @isccArgs installer/HydraMixer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          Get-ChildItem installer/Output
+
+      - name: Keep the files
+        uses: actions/upload-artifact@v4
+        with:
+          name: HydraMixer-Windows
+          path: |
+            installer/Output/*.exe
+            installer/Output/*.zip
+            test-log.txt
+          if-no-files-found: warn
+
+      - name: Attach to the release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/Output/*.exe
+            installer/Output/*.zip
