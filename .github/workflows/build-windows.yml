@@ -94,6 +94,8 @@ jobs:
           def main() -> int:
               zips = sorted(glob.glob(str(repo / "Hydra-Mixer-*.zip")))
               if not zips:
+                  print("::warning::No Hydra-Mixer-*.zip at the root of the repository, so the repository is built as it is (without any uploaded sources). "
+                        "To build the sources of a zip, upload it to the root of the branch you run this workflow from.")
                   print("No Hydra-Mixer-*.zip in the repository: the sources are built as they are.")
                   return 0
               if len(zips) > 1:
@@ -185,7 +187,12 @@ jobs:
 
       - name: Make the installer and the portable zip
         run: |
-          $exe = (Resolve-Path "build/Release/HydraMixer_artefacts/Release/Hydra Mixer Potato.exe").Path
+          $exe = "build/Release/HydraMixer_artefacts/Release/Hydra Mixer Potato.exe"
+          if (-not (Test-Path $exe)) {
+            if (Test-Path "build/Release/HydraMixer_artefacts/Release/Hydra Mixer.exe") { throw "Hydra Mixer.exe was built, not Hydra Mixer Potato.exe: the Potato sources were not used. Upload the Hydra-Mixer-*.zip to the ROOT of the repository (on the branch you run the workflow from) and run again." }
+            throw "Hydra Mixer Potato.exe was not built."
+          }
+          $exe = (Resolve-Path $exe).Path
           $version = "0.6.0"
           if ((Get-Content CMakeLists.txt -Raw) -match 'project\(HydraMixer VERSION ([0-9][0-9.]*)') { $version = $Matches[1] }
           New-Item -ItemType Directory -Force installer/Output | Out-Null
